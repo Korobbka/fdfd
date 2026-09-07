@@ -1,0 +1,255 @@
+local DataManager = {}
+
+local Players = game:GetService("Players")
+local MarketplaceService = game:GetService("MarketplaceService")
+local ServerScriptService = game:GetService("ServerScriptService")
+local ServerStorage = game:GetService("ServerStorage")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ProfileService = require(ServerScriptService:WaitForChild("ProfileService"))
+local SPECIAL_ITEMS = require(ServerScriptService:WaitForChild("ShopPrice"))
+
+local Timer = ReplicatedStorage:WaitForChild("TimerAdded")
+local ToolsFolder = ServerStorage:WaitForChild("Tools")
+
+local GAMEPASS_ID = 1962595099
+
+local ProfileTemplate = {
+	Coins = 10,
+	inventory = {},
+	TotalLevel = 0,
+	Stamina = 1,
+
+	Upgrades = {
+		Trash = 0,
+		Max = 10,
+		Bacplack = 5,
+		MaxSpeed = 0,
+		buff = false
+	},
+	levels = {
+		Trash = 0,
+		Max = 0,
+		Speed = 0
+	}
+}
+
+local ProfileStore = ProfileService.GetProfileStore("PlayerDataStoreV2", ProfileTemplate)
+local Profiles = {}
+
+local function UpdateLeaderstat(player, statName, value)
+	local leaderstats = player:FindFirstChild("leaderstats")
+	if not leaderstats then return end
+
+	local stat = leaderstats:FindFirstChild(statName)
+	if stat then
+		stat.Value = value
+	end
+end
+
+local function GiveItemToPlayer(player, itemID)
+	local tool = ToolsFolder:FindFirstChild(itemID)
+	if not tool then
+		warn(`[DataManager] Предмет {itemID} не найден в ServerStorage.Tools`)
+		return
+	end
+
+	local backpack = player:FindFirstChild("Backpack")
+	if backpack then
+		tool:Clone().Parent = backpack
+	end
+
+	local starterGear = player:FindFirstChild("StarterGear")
+	if starterGear then
+		tool:Clone().Parent = starterGear
+	end
+end
+
+local function CheckAndApplyGamePass(player, profile)
+	local success, hasPass = pcall(function()
+		return MarketplaceService:UserOwnsGamePassAsync(player.UserId, GAMEPASS_ID)
+	end)
+
+	if success and hasPass then
+		profile.Data.Upgrades.buff = true
+	end
+end
+
+local function OnPlayerAdded(player)
+	local profile = ProfileStore:LoadProfileAsync(`{player.UserId}`)
+
+	if not profile then
+		player:Kick("Не удалось загрузить данные. Перезайдите.")
+		return
+	end
+
+	profile:AddUserId(player.UserId)
+	profile:Reconcile()
+
+	profile:ListenToRelease(function()
+		Profiles[player] = nil
+		player:Kick("Сессия закрыта. Перезайдите в игру.")
+	end)
+
+	if not player:IsDescendantOf(Players) then
+		profile:Release()
+		return
+	end
+
+	Profiles[player] = profile
+	Timer:Fire(player, "Go")
+
+	CheckAndApplyGamePass(player, profile)
+
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+
+	local coins = Instance.new("IntValue")
+	coins.Name = "Coins"
+	coins.Value = profile.Data.Coins
+	coins.Parent = leaderstats
+
+	local stamina = Instance.new("IntValue")
+	stamina.Name = "Stamina"
+	stamina.Value = profile.Data.Stamina
+	stamina.Parent = leaderstats
+
+	leaderstats.Parent = player
+
+	for _, itemID in ipairs(profile.Data.inventory) do
+		GiveItemToPlayer(player, itemID)
+	end
+end
+
+local function OnPlayerRemoving(player)
+	Timer:Fire(player, "Stop")
+
+	local profile = Profiles[player]
+	if profile then
+		profile:Release()
+	end
+end
+
+MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, purchasedId, isPurchased)
+	if not isPurchased or purchasedId ~= GAMEPASS_ID then return end
+
+	local profile = Profiles[player]
+	if profile then
+		profile.Data.Upgrades.buff = true
+	end
+end)
+
+function DataManager.GetProfile(player)
+	return Profiles[player]
+end
+
+function DataManager.AddItem(player, itemID)
+	local profile = Profiles[player]
+	if not profile then return end
+
+	table.insert(profile.Data.inventory, itemID)
+	GiveItemToPlayer(player, itemID)
+end
+
+function DataManager.RemoveItem(player, itemID)
+	local profile = Profiles[player]
+	if not profile then return end
+
+	local index = table.find(profile.Data.inventory, itemID)
+	if index then
+		table.remove(profile.Data.inventory, index)
+	end
+end
+
+function DataManager.ClearInventory(player)
+	local profile = Profiles[player]
+	if not profile then return end
+
+	table.clear(profile.Data.inventory)
+end
+
+function DataManager.SetInventory(player, newInventory)
+	local profile = Profiles[player]
+	if not profile or type(newInventory) ~= "table" then return end
+
+	profile.Data.inventory = newInventory
+end
+
+function DataManager.GetItemSellPrice(player, itemName)
+	local profile = Profiles[player]
+	local bonus = profile and profile.Data.Upgrades and profile.Data.Upgrades.Trash or 0
+	local basePrice = SPECIAL_ITEMS[itemName] or 0
+
+	return math.floor(basePrice + bonus)
+end
+
+function DataManager.AddCoins(player, amount)
+	local profile = Profiles[player]
+	if not profile then return end
+
+	profile.Data.Coins = math.max(0, profile.Data.Coins + amount)
+	UpdateLeaderstat(player, "Coins", profile.Data.Coins)
+end
+
+function DataManager.DeleteCoins(player, amount)
+	DataManager.AddCoins(player, -amount)
+end
+
+function DataManager.StaminaUP(player, amount)
+	local profile = Profiles[player]
+	if not profile then return end
+
+	profile.Data.Stamina = math.max(0, profile.Data.Stamina + amount)
+	UpdateLeaderstat(player, "Stamina", profile.Data.Stamina)
+end
+
+function DataManager.GetStamina(player)
+	local profile = Profiles[player]
+	return profile and profile.Data.Stamina or 0
+end
+
+function DataManager.ResetData(player)
+	local profile = Profiles[player]
+	if not profile then return end
+
+	profile.Data = TableUtil and TableUtil.Copy(ProfileTemplate) or {
+		Coins = ProfileTemplate.Coins,
+		inventory = {},
+		TotalLevel = ProfileTemplate.TotalLevel,
+		Stamina = ProfileTemplate.Stamina,
+		Upgrades = {
+			Trash = ProfileTemplate.Upgrades.Trash,
+			Max = ProfileTemplate.Upgrades.Max,
+			Bacplack = ProfileTemplate.Upgrades.Bacplack,
+			MaxSpeed = ProfileTemplate.Upgrades.MaxSpeed,
+			buff = false
+		},
+		levels = {
+			Trash = ProfileTemplate.levels.Trash,
+			Max = ProfileTemplate.levels.Max,
+			Speed = ProfileTemplate.levels.Speed
+		}
+	}
+
+	UpdateLeaderstat(player, "Coins", profile.Data.Coins)
+	UpdateLeaderstat(player, "Stamina", profile.Data.Stamina)
+
+	local backpack = player:FindFirstChild("Backpack")
+	if backpack then
+		backpack:ClearAllChildren()
+	end
+
+	local starterGear = player:FindFirstChild("StarterGear")
+	if starterGear then
+		starterGear:ClearAllChildren()
+	end
+end
+
+Players.PlayerAdded:Connect(OnPlayerAdded)
+Players.PlayerRemoving:Connect(OnPlayerRemoving)
+
+for _, player in Players:GetPlayers() do
+	task.spawn(OnPlayerAdded, player)
+end
+
+return DataManager
