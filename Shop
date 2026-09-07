@@ -1,0 +1,127 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local BUY = ReplicatedStorage:WaitForChild("BUY")
+local DataManager = require(ServerScriptService:WaitForChild("ModulMand"))
+
+local PRICE_MULTIPLIER = 1.35
+local processingPlayers = {}
+
+local UPGRADE_CONFIG = {
+	Speed = {
+		Price = 1500,
+		Apply = function(player)
+			DataManager.StaminaUP(player, 1)
+		end
+	},
+	Trash = {
+		Price = 2500,
+		Apply = function(player)
+			local profile = DataManager.GetProfile(player)
+			if profile then
+				profile.Data.Upgrades.Trash = (profile.Data.Upgrades.Trash or 0) + 50
+			end
+		end
+	},
+	Max = {
+		Price = 2500,
+		Apply = function(player)
+			local profile = DataManager.GetProfile(player)
+			if profile then
+				profile.Data.Upgrades.Max = (profile.Data.Upgrades.Max or 0) + 10
+			end
+		end
+	},
+	Space = {
+		Price = 1000,
+		Apply = function(player)
+			local profile = DataManager.GetProfile(player)
+			if profile then
+				profile.Data.Upgrades.Bacplack = (profile.Data.Upgrades.Bacplack or 0) + 1
+			end
+		end
+	},
+	MaxSpeed = {
+		Price = 3200,
+		Apply = function(player)
+			local profile = DataManager.GetProfile(player)
+			if profile then
+				profile.Data.Upgrades.MaxSpeed = (profile.Data.Upgrades.MaxSpeed or 0) + 1
+			end
+		end
+	}
+}
+
+local function GetNextPrice(player, itemType)
+	local profile = DataManager.GetProfile(player)
+	local upgradeData = UPGRADE_CONFIG[itemType]
+	if not profile or not upgradeData then return 0 end
+
+	local currentLevel = (profile.Data.levels and profile.Data.levels[itemType]) or 0
+	return math.floor(upgradeData.Price * (PRICE_MULTIPLIER ^ currentLevel))
+end
+
+local function GetPlayerPrices(player)
+	local prices = {}
+	for itemType in pairs(UPGRADE_CONFIG) do
+		prices[itemType] = GetNextPrice(player, itemType)
+	end
+	return prices
+end
+
+local function OnBuyRequest(player, itemType)
+	if type(itemType) ~= "string" or not UPGRADE_CONFIG[itemType] then return end
+	if processingPlayers[player] then return end
+
+	local profile = DataManager.GetProfile(player)
+	if not profile then return end
+
+	if itemType == "Max" and profile.Data.Upgrades and profile.Data.Upgrades.buff then
+		return
+	end
+
+	processingPlayers[player] = true
+
+	local currentPrice = GetNextPrice(player, itemType)
+	local currentCoins = profile.Data.Coins or 0
+
+	if currentCoins >= currentPrice then
+		DataManager.DeletCoins(player, currentPrice)
+
+		if not profile.Data.levels then
+			profile.Data.levels = {}
+		end
+		profile.Data.levels[itemType] = (profile.Data.levels[itemType] or 0) + 1
+
+		UPGRADE_CONFIG[itemType].Apply(player)
+
+		local nextPrice = GetNextPrice(player, itemType)
+		BUY:FireClient(player, itemType, nextPrice)
+	end
+
+	processingPlayers[player] = nil
+end
+
+BUY.OnServerEvent:Connect(OnBuyRequest)
+
+Players.PlayerAdded:Connect(function(player)
+	local attempts = 0
+	local profile = nil
+
+	repeat
+		profile = DataManager.GetProfile(player)
+		if not profile then
+			task.wait(0.2)
+			attempts += 1
+		end
+	until profile or attempts >= 25 or not player:IsDescendantOf(Players)
+
+	if not profile then return end
+
+	BUY:FireClient(player, "InitPrices", GetPlayerPrices(player))
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	processingPlayers[player] = nil
+end)
