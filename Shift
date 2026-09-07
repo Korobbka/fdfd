@@ -1,0 +1,127 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local ShiftEvent = ReplicatedStorage:WaitForChild("Shift")
+local DataManager = require(ServerScriptService:WaitForChild("ModulMand"))
+
+local DEFAULT_MAX_STAMINA = 100
+local STAMINA_CONSUMPTION_RATE = 25
+local NETWORK_UPDATE_INTERVAL = 0.1
+
+local playerStates = {}
+
+local function GetMaxStamina(player)
+	local profile = DataManager.GetProfile(player)
+	local bonusMax = profile and profile.Data and profile.Data.Max or 0
+	return DEFAULT_MAX_STAMINA + bonusMax
+end
+
+local function GetMaxSpeedBonus(player)
+	local profile = DataManager.GetProfile(player)
+	if not profile or not profile.Data or not profile.Data.Upgrades then
+		return 0
+	end
+	return profile.Data.Upgrades.MaxSpeed or 0
+end
+
+local function HasDonatorBuff(player)
+	local profile = DataManager.GetProfile(player)
+	return profile and profile.Data and profile.Data.buff or false
+end
+
+local function CleanupPlayerState(player)
+	local state = playerStates[player]
+	if not state then return end
+
+	if state.HeartbeatConnection then
+		state.HeartbeatConnection:Disconnect()
+		state.HeartbeatConnection = nil
+	end
+
+	playerStates[player] = nil
+end
+
+local function InitPlayerState(player)
+	if playerStates[player] then return playerStates[player] end
+
+	local maxStamina = GetMaxStamina(player)
+	local newState = {
+		CurrentStamina = maxStamina,
+		IsSprinting = false,
+		LastNetworkUpdate = 0,
+		HeartbeatConnection = nil,
+	}
+
+	playerStates[player] = newState
+	return newState
+end
+
+local function ProcessStaminaTick(player, state, dt)
+	local character = player.Character
+	if not character then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		if state.HeartbeatConnection then
+			state.HeartbeatConnection:Disconnect()
+			state.HeartbeatConnection = nil
+		end
+		state.IsSprinting = false
+		return
+	end
+
+	local maxStamina = GetMaxStamina(player)
+	local speedBonus = GetMaxSpeedBonus(player)
+	local isMoving = humanoid.MoveDirection.Magnitude > 0
+
+	if state.IsSprinting and isMoving and state.CurrentStamina > 0 then
+		humanoid.WalkSpeed = 32 + speedBonus
+		state.CurrentStamina = math.max(0, state.CurrentStamina - (STAMINA_CONSUMPTION_RATE * dt))
+
+		if state.CurrentStamina <= 0 then
+			state.IsSprinting = false
+			humanoid.WalkSpeed = 16
+		end
+	else
+		humanoid.WalkSpeed = 16
+		if state.CurrentStamina < maxStamina then
+			local regenRate = DataManager.GetStamina(player) or 1
+			state.CurrentStamina = math.min(maxStamina, state.CurrentStamina + (regenRate * dt))
+		end
+	end
+
+	local now = os.clock()
+	if now - state.LastNetworkUpdate >= NETWORK_UPDATE_INTERVAL then
+		state.LastNetworkUpdate = now
+		ShiftEvent:FireClient(player, math.floor(state.CurrentStamina), maxStamina)
+	end
+end
+
+local function OnShiftToggle(player, isSprinting)
+	local character = player.Character
+	if not character then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then return end
+
+	local speedBonus = GetMaxSpeedBonus(player)
+
+	if HasDonatorBuff(player) then
+		humanoid.WalkSpeed = isSprinting and (40 + speedBonus) or 16
+		return
+	end
+
+	local state = InitPlayerState(player)
+	state.IsSprinting = isSprinting
+
+	if not state.HeartbeatConnection then
+		state.HeartbeatConnection = RunService.Heartbeat:Connect(function(dt)
+			ProcessStaminaTick(player, state, dt)
+		end)
+	end
+end
+
+ShiftEvent.OnServerEvent:Connect(OnShiftToggle)
+Players.PlayerRemoving:Connect(CleanupPlayerState)
