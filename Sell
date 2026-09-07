@@ -1,0 +1,98 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local SellAllEvent = ReplicatedStorage:WaitForChild("SellAll")
+local SellEquippedEvent = ReplicatedStorage:WaitForChild("Sell1")
+
+local DataManager = require(ServerScriptService:WaitForChild("ModulMand"))
+local SPECIAL_ITEMS = require(ServerScriptService:WaitForChild("ShopPrice"))
+
+local processingPlayers = {}
+
+local function RemoveItemFromInventoryData(inventoryTable, itemID)
+	local index = table.find(inventoryTable, itemID)
+	if index then
+		table.remove(inventoryTable, index)
+		return true
+	end
+	return false
+end
+
+local function OnSellAll(player)
+	if processingPlayers[player] then return end
+
+	local profile = DataManager.GetProfile(player)
+	if not profile or not type(profile.Data.inventory) == "table" then return end
+
+	processingPlayers[player] = true
+
+	local totalEarned = 0
+	local itemsToDestroy = {}
+
+	local backpack = player:FindFirstChild("Backpack")
+	if backpack then
+		for _, tool in ipairs(backpack:GetChildren()) do
+			if tool:IsA("Tool") and SPECIAL_ITEMS[tool.Name] then
+				table.insert(itemsToDestroy, tool)
+			end
+		end
+	end
+
+	local character = player.Character
+	if character then
+		for _, tool in ipairs(character:GetChildren()) do
+			if tool:IsA("Tool") and SPECIAL_ITEMS[tool.Name] then
+				table.insert(itemsToDestroy, tool)
+			end
+		end
+	end
+
+	for _, tool in ipairs(itemsToDestroy) do
+		local price = DataManager.GetItemSellPrice(player, tool.Name)
+		totalEarned += price
+		tool:Destroy()
+	end
+
+	if totalEarned > 0 then
+		DataManager.ClearInventory(player)
+		DataManager.AddCoins(player, totalEarned)
+		SellAllEvent:FireClient(player, totalEarned)
+	end
+
+	processingPlayers[player] = nil
+end
+
+local function OnSellEquipped(player)
+	if processingPlayers[player] then return end
+
+	local profile = DataManager.GetProfile(player)
+	if not profile or type(profile.Data.inventory) ~= "table" then return end
+
+	local character = player.Character
+	if not character then return end
+
+	local equippedTool = character:FindFirstChildOfClass("Tool")
+	if not equippedTool or not SPECIAL_ITEMS[equippedTool.Name] then return end
+
+	processingPlayers[player] = true
+
+	local price = DataManager.GetItemSellPrice(player, equippedTool.Name)
+	local itemName = equippedTool.Name
+
+	equippedTool:Destroy()
+
+	RemoveItemFromInventoryData(profile.Data.inventory, itemName)
+
+	DataManager.AddCoins(player, price)
+	SellEquippedEvent:FireClient(player, price)
+
+	processingPlayers[player] = nil
+end
+
+SellAllEvent.OnServerEvent:Connect(OnSellAll)
+SellEquippedEvent.OnServerEvent:Connect(OnSellEquipped)
+
+Players.PlayerRemoving:Connect(function(player)
+	processingPlayers[player] = nil
+end)
